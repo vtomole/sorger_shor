@@ -1,0 +1,19 @@
+{
+    "Simulator": {
+        "odd_composite_numbers": {
+            "9": {
+                "correct": 10,
+                "incorrect": 0,
+                "dnf": 0
+            },
+            "15": {
+                "correct": 6,
+                "incorrect": 0,
+                "dnf": 0
+            }
+        }
+    },
+    "QHW": {
+        "odd_composite_numbers": {}
+    }
+}
