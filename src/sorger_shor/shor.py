@@ -17,7 +17,7 @@ from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 from qiskit_aer import AerSimulator
 from qiskit_ibm_runtime import SamplerV2 as Sampler
 
-from config.config import configure
+# from config.config import configure
 
 
 # ## Condition to Expression
@@ -202,8 +202,10 @@ def inv_qft_rotation_simple(circuit, n, m, q, c):
     # calculate a sum of angles applied 
     for k in revl:
         #circuit.p(-pi/2**(k-1), q).c_if(c[control_idx], 1)
-        with circuit.if_test(condition_to_expr(c[control_idx], 1)):
-            circuit.p(-pi/2**(k-1), q)        
+
+        # TODO comment back in when converter has been fixed to deal with this.
+        # with circuit.if_test(condition_to_expr(c[control_idx], 1)):
+        #     circuit.p(-pi/2**(k-1), q)
         control_idx+=1
     # apply hadamard gate
     circuit.h(q)
@@ -632,8 +634,7 @@ def extended_gcd(a, b):
 def mod_inverse(a, m, isPrinting=True):
     gcd, x, _ = extended_gcd(a, m)
     if gcd != 1:
-        if isPrinting:
-            print(f"The modular inverse does not exist for {a} modulo {m}.")
+            raise ValueError(f"The modular inverse does not exist for {a} modulo {m}.")
     else:
         return x % m
 
@@ -648,7 +649,55 @@ def choose_random_a(N):
 
 # In[24]:
 
-def factor_integer(N, isSimulator=True, isCircuitOptimized=False, isPrinting=True, device_backend = None):
+def factoring_circuit(N, isCircuitOptimized=True, isPrinting=False):
+    # Step 2: Calculate the number of qubits needed
+    n = math.ceil(math.log(N, 2))
+    # Step 3: Perform various iterations to find the factors
+    # Step 4: Set up quantum registers
+    aux_reg = QuantumRegister(n + 2, name="aux")
+    eigen_vec_reg = QuantumRegister(n, name="eigen vec")
+    counting_reg = None
+    counting_reg_1qubit = None
+    # Choose counting register based on optimization flag
+    if isCircuitOptimized:
+        counting_reg_1qubit = QuantumRegister(1, name="counting_1_qubit")
+    else:
+        counting_reg = QuantumRegister(2 * n, name="counting_2n_qubit")
+    classic_reg = ClassicalRegister(2 * n, name="classic")
+    # Step 5: Create the Quantum Circuit
+    if isCircuitOptimized:
+        circuit = QuantumCircuit(eigen_vec_reg, aux_reg, counting_reg_1qubit, classic_reg)
+    else:
+        circuit = QuantumCircuit(counting_reg, eigen_vec_reg, aux_reg, classic_reg)
+        circuit.h(counting_reg)
+    # Step 6: Initialize eigenvector to |00..01>
+    circuit.x(eigen_vec_reg[0])
+    # Step 7: Performing a lucky guess by calculating the gcd for a random 'a' auch that 1 < a < N
+    a = choose_random_a(N)
+
+    # Step 8: Run the order-finding quantum computing subroutine
+    if isCircuitOptimized:
+        # Step 9: Serialize the phase estimation process.
+        # Instead of having 2n qubits in superposition all at once,
+        # the circuit reuses a single qubit, performing the controlled operations iteratively
+        serialize_2n(circuit, counting_reg_1qubit, eigen_vec_reg, aux_reg, classic_reg, a, N, n)
+    else:
+        # Step 9: Apply unitary operator (gen_ua) controlled by each counting qubit
+        # Using the property : ((a^n) * x) mod N = (a..(a(ax)mod N)mod N)..)mod N)
+        # we don't need to apply the Ua gate n-times to get (Ua)^n because we can directly
+        # run Ua^n (where a^n mod N in computed classically) which is the same as (Ua)^n
+        for i in range(2 * n):
+            # Compute classically: a^(2^i)
+            gen_ua(circuit, counting_reg[i], eigen_vec_reg, aux_reg, int(pow(a, pow(2, i))), N, n, isPrinting)
+
+        inv_qft(circuit, 2 * n, 2 * n, counting_reg, True)
+
+        circuit.measure(counting_reg, classic_reg)
+    return circuit
+
+
+
+def factor_integer(N, isSimulator=True, isCircuitOptimized=True, isPrinting=False, device_backend = None):
     """
     Implementation of Shor's Algorithm to factorize a composite number N using Quantum Computing.
     
@@ -663,120 +712,20 @@ def factor_integer(N, isSimulator=True, isCircuitOptimized=False, isPrinting=Tru
     
     MAX_ITER_REAL_DEVICE = 1
     MAX_ITER_SIM = 10
-    
-    # Step 1: N is screened to check for trivial factors
-    if isPrinting:
-        print("Step 1: Screening for trivial factors is performed")
-    result, p, q = check_for_simple_factors(N, isPrinting)
-    if result:
-        return result, p, q
-
-    # Step 2: Calculate the number of qubits needed
     n = math.ceil(math.log(N,2))
-    if isSimulator:
-        if isPrinting:
-            print(f"Step 2: Calculating the number of qubits. Factoring {N} with n = {n} qubits on a simulator")
-    else:
-        if isPrinting:
-            print(f"Step 2: Calculating the number of qubits. Factoring {N} with n = {n} qubits on a real device")
-    
     max_iter = MAX_ITER_SIM if isSimulator else MAX_ITER_REAL_DEVICE
     a = 2 #default a
-
-    # Step 3: Perform various iterations to find the factors
+    #
+    # # Step 3: Perform various iterations to find the factors
     for count in range(max_iter):
-        if isPrinting:
-            print(f"Step 3: Start iteration {count} out of {max_iter} max iterations")
-
-        # Step 4: Set up quantum registers
-        aux_reg = QuantumRegister(n + 2, name="aux")
-        eigen_vec_reg = QuantumRegister(n, name="eigen vec")
-        counting_reg = None
-        counting_reg_1qubit = None
-
-        if isPrinting:
-            print("Step 4: Setting up registers...")
-            print(f"-> Auxiliary register: {n+2} qubits")
-            print(f"-> Eigenvector register: {n} qubits")
-        
-        # Choose counting register based on optimization flag
-        if isCircuitOptimized:
-            counting_reg_1qubit = QuantumRegister(1, name="counting_1_qubit")
-            if isPrinting:
-                print(f"-> Counting register: {1} qubit")
-        else:
-            counting_reg = QuantumRegister(2*n, name="counting_2n_qubit")
-            if isPrinting:
-                print(f"-> Counting register: {2*n} qubits")
-        classic_reg = ClassicalRegister(2*n, name="classic")
-        if isPrinting:
-            print(f"-> Classic register: {2*n} qubits")
-        
-        
-        # Step 5: Create the Quantum Circuit
-        circuit = 0
-        if isCircuitOptimized:
-            circuit = QuantumCircuit(eigen_vec_reg, aux_reg, counting_reg_1qubit, classic_reg)
-        else:
-            circuit = QuantumCircuit(counting_reg, eigen_vec_reg, aux_reg, classic_reg)
-            circuit.h(counting_reg)
-    
-        if isPrinting:
-            print(f"Step 5: Creating the Quantum Circuit with {circuit.num_qubits} total qubits used")
-        
-        # Step 6: Initialize eigenvector to |00..01>   
-        circuit.x(eigen_vec_reg[0])
-        if isPrinting:
-            print("Step 6: Initializing eigenvector to |00..01>")
-
-        # Step 7: Performing a lucky guess by calculating the gcd for a random 'a' auch that 1 < a < N
-        a = choose_random_a(N)
-
-        if isPrinting:
-            print(f"Step 7: Performing a lucky guess with a = {a}")
-        
-        d = gcd(a, N)
-
-        if d > 1:
-            if isPrinting:
-                print("RESULT: Found a factor without any quantum computing using a lucky guess")
-            return True, d, (int)(N/d)
-            
-        # Step 8: Run the order-finding quantum computing subroutine
-        if isPrinting:
-            print("Step 8: Starting the order-finding quantum computing subroutine")
-        
-        if isCircuitOptimized:
-            # Step 9: Serialize the phase estimation process. 
-            # Instead of having 2n qubits in superposition all at once, 
-            # the circuit reuses a single qubit, performing the controlled operations iteratively
-            if isPrinting:
-                print("Step 9: Serializing the phase estimation process for optimization purposes")
-            serialize_2n(circuit, counting_reg_1qubit, eigen_vec_reg, aux_reg, classic_reg, a, N, n)
-        else:
-            # Step 9: Apply unitary operator (gen_ua) controlled by each counting qubit
-            # Using the property : ((a^n) * x) mod N = (a..(a(ax)mod N)mod N)..)mod N)
-            # we don't need to apply the Ua gate n-times to get (Ua)^n because we can directly
-            # run Ua^n (where a^n mod N in computed classically) which is the same as (Ua)^n 
-            if isPrinting:
-                print("Step 9: Encoding the phase information related to the eigenvalue of Ua into the amplitudes of the counting register qubits, using classical computing to calculate a^(2^i).")
-            for i in range(2*n):
-                # Compute classically: a^(2^i)
-                gen_ua(circuit, counting_reg[i], eigen_vec_reg, aux_reg, int(pow(a, pow(2, i))), N, n, isPrinting)
-
-            inv_qft(circuit, 2*n, 2*n, counting_reg, True)
-            
-            circuit.measure(counting_reg, classic_reg)
-        
-        if isPrinting:
-            print(f"Quantum circuit depth: {circuit.depth()}")
+        circuit = factoring_circuit(N, isCircuitOptimized, isPrinting)
         
         # Step 10: Set up backend
         shots = 10
         backend = AerSimulator() if isSimulator else device_backend
         if isPrinting:
-            print(f"Step 10: Setting up '{backend.name}' as a backend")     
-        
+            print(f"Step 10: Setting up '{backend.name}' as a backend")
+
         pm = generate_preset_pass_manager(backend=backend, optimization_level=3)
         isa_qc = pm.run(circuit)
 
@@ -788,7 +737,7 @@ def factor_integer(N, isSimulator=True, isCircuitOptimized=False, isPrinting=Tru
 
         # Step 11: Analyzing the results
         pub_result = job.result()[0]
-        counts = pub_result.data.classic.get_counts()            
+        counts = pub_result.data.classic.get_counts()
 
         # Convert measurement results to phases
         rows, measured_phases = [], []
@@ -797,7 +746,7 @@ def factor_integer(N, isSimulator=True, isCircuitOptimized=False, isPrinting=Tru
             phase = decimal/(2**(2*n))  # Find corresponding eigenvalue
             measured_phases.append(phase)
             rows.append([f"{output}(bin) = {decimal:>3}(dec)", f"{decimal}/{2**(2*n)} = {phase:.2f}"])
-            
+
         df = pd.DataFrame(rows, columns=["Register Output", "Phase"])
         if isPrinting:
             print("Step 11: Analyzing the results\n")
@@ -811,13 +760,13 @@ def factor_integer(N, isSimulator=True, isCircuitOptimized=False, isPrinting=Tru
             result = convCf2F(terms)
             if(result):
                 rows.append([phase, f"{result[1]}/{result[2]}", result[2]])
-                
+
         df = pd.DataFrame(rows, columns=["Phase", "Fraction", "Guess for r"])
         if isPrinting:
             print("Step 12: Convert phases to continued fractions to find guesses for r\n")
             print(df)
             print('\n')
-        
+
         # Step 13: Check if a valid period r was found and use it to find factors
         if isPrinting:
             print(f"Step 13: Evaluating the {len(rows)} possible candidates for the period r")
@@ -825,23 +774,23 @@ def factor_integer(N, isSimulator=True, isCircuitOptimized=False, isPrinting=Tru
             r = row[2]
             if isPrinting:
                 print(f"Candidate {i}: Guessed period r = {r}")
-            
+
             if r % 2 == 0: # r must be even
                 exponent = int(r // 2)
-                x = pow(a, exponent, N) 
+                x = pow(a, exponent, N)
 
                 # Check (a^(r/2) ± 1) mod N
                 factor1 = gcd(x - 1, N)
                 factor2 = gcd(x + 1, N)
-                
+
                 if factor1 != 1 and factor1 != N:
                     if isPrinting:
                         print(f"RESULT: Found the factor {factor1} with {N} = {factor1} x {N // factor1}")
-                    return True, factor1, N // factor1
+                    return True, factor1, N // factor1, isa_qc
                 if factor2 != 1 and factor2 != N:
                     if isPrinting:
                         print(f"RESULT: Found the factor {factor2} with {N} = {factor2} x {N // factor2}")
-                    return True, factor2, N // factor2
+                    return True, factor2, N // factor2, isa_qc
     if isPrinting:                
         print("FAILURE: Factorization failed")
     return False, 0, 0
@@ -1043,19 +992,20 @@ def serialize_2n(circuit, counting_reg_1qubit, eigen_vec_reg, aux_reg, classic_r
         circuit.measure(counting_reg_1qubit, classic_reg[i])
         
         # Apply X if the measured qubit is 1
-        with circuit.if_test(condition_to_expr(classic_reg[i],1)):
-           circuit.x(counting_reg_1qubit)
+        # TODO comment back in when converter has been modified to handle this.
+        # with circuit.if_test(condition_to_expr(classic_reg[i],1)):
+        #    circuit.x(counting_reg_1qubit)
 
 
 # In[31]:
 
 
 def configure_service(isSimulator, isPrinting=True):
-    service = configure(isPrinting=isPrinting)
-    if isSimulator == False:
-        device_backend = service.least_busy(operational=True, dynamic_circuits=True)
-    else:
-        device_backend = None
+    # service = configure(isPrinting=isPrinting)
+    # if isSimulator == False:
+    #     device_backend = service.least_busy(operational=True, dynamic_circuits=True)
+    # else:
+    device_backend = None
 
     if isPrinting:
         print("backend: ", device_backend.name)
